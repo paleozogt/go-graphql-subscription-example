@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 
 	graphql "github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
 	"github.com/graph-gophers/graphql-transport-ws/graphqlws"
+	"github.com/mustafaturan/bus"
+	"github.com/mustafaturan/monoton"
+	"github.com/mustafaturan/monoton/sequencer"
 )
 
 const schema = `
@@ -74,17 +76,21 @@ func main() {
 }
 
 type resolver struct {
-	helloSaidEvents     chan *helloSaidEvent
-	helloSaidSubscriber chan *helloSaidSubscriber
+	bus *bus.Bus
+	gen bus.Next
 }
 
 func newResolver() *resolver {
-	r := &resolver{
-		helloSaidEvents:     make(chan *helloSaidEvent),
-		helloSaidSubscriber: make(chan *helloSaidSubscriber),
-	}
+	m, _ := monoton.New(sequencer.NewMillisecond(), uint64(1), uint64(0))
+	var gen bus.Next = m.Next
 
-	go r.broadcastHelloSaid()
+	bus, _ := bus.NewBus(gen)
+	bus.RegisterTopics(helloEventName)
+
+	r := &resolver{
+		bus: bus,
+		gen: gen,
+	}
 
 	return r
 }
@@ -96,59 +102,43 @@ func (r *resolver) Hello() string {
 func (r *resolver) SayHello(args struct{ Msg string }) *helloSaidEvent {
 	e := &helloSaidEvent{msg: args.Msg, id: randomID()}
 	go func() {
-		select {
-		case r.helloSaidEvents <- e:
-		case <-time.After(1 * time.Second):
-		}
+		r.bus.Emit(context.Background(), helloEventName, e)
 	}()
 	return e
 }
 
-type helloSaidSubscriber struct {
-	stop   <-chan struct{}
-	events chan<- *helloSaidEvent
-}
-
-func (r *resolver) broadcastHelloSaid() {
-	subscribers := map[string]*helloSaidSubscriber{}
-	unsubscribe := make(chan string)
-
-	// NOTE: subscribing and sending events are at odds.
-	for {
-		select {
-		case id := <-unsubscribe:
-			delete(subscribers, id)
-		case s := <-r.helloSaidSubscriber:
-			subscribers[randomID()] = s
-		case e := <-r.helloSaidEvents:
-			for id, s := range subscribers {
-				go func(id string, s *helloSaidSubscriber) {
-					select {
-					case <-s.stop:
-						unsubscribe <- id
-						return
-					default:
-					}
-
-					select {
-					case <-s.stop:
-						unsubscribe <- id
-					case s.events <- e:
-					case <-time.After(time.Second):
-					}
-				}(id, s)
-			}
-		}
-	}
-}
-
 func (r *resolver) HelloSaid(ctx context.Context) <-chan *helloSaidEvent {
+	id := r.gen()
 	c := make(chan *helloSaidEvent)
-	// NOTE: this could take a while
-	r.helloSaidSubscriber <- &helloSaidSubscriber{events: c, stop: ctx.Done()}
+
+	handler := bus.Handler{
+		Handle: func(e *bus.Event) {
+			c <- e.Data.(*helloSaidEvent)
+		},
+		Matcher: helloEventName,
+	}
+
+	r.bus.RegisterHandler(id, &handler)
+
+	callWhenDone(ctx, func() {
+		r.bus.DeregisterHandler(id)
+		close(c)
+	})
 
 	return c
 }
+
+func callWhenDone(ctx context.Context, f func()) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			f()
+			break
+		}
+	}()
+}
+
+const helloEventName string = "hello"
 
 type helloSaidEvent struct {
 	id  string

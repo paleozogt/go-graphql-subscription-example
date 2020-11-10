@@ -5,6 +5,7 @@ This application uses:
 
 * [github.com/graph-gophers/graphql-go](https://github.com/graph-gophers/graphql-go)
 * [github.com/graph-gophers/graphql-transport-ws](https://github.com/graph-gophers/graphql-transport-ws)
+* [github.com/mustafaturan/bus](https://github.com/mustafaturan/bus)
 
 ## Pre-requisites
 
